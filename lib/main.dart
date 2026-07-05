@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
 import 'model/dog_run_map_model.dart';
 import 'service/dog_run_service.dart';
+import 'service/location_service.dart';
 
 void main() {
   runApp(const MyApp());
@@ -28,21 +30,34 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final DogRunService _apiService = DogRunService();
-  late Future<List<DogRunMapData>> _dogRunsFuture;
+  final LocationService _locationService = LocationService();
+
+  // 画面に必要な2つのデータをまとめたFuture
+  late Future<MapDataResult> _mapDataFuture;
 
   // 地図の初期表示位置（代々木公園付近）
-  static const CameraPosition _kInitialPosition = CameraPosition(
-    target: LatLng(35.6715, 139.6966),
-    zoom: 12.5,
-  );
+  static const LatLng _defaultCenter = LatLng(35.6715, 139.6966);
 
   @override
   void initState() {
     super.initState();
-    _dogRunsFuture = _apiService.fetchMapRuns();
+    _mapDataFuture = _loadInitialData();
   }
 
-  // APIから取得したドッグランのリストを、GoogleMap用のMarker（ピン）のセットに変換する関数
+  // 現在地とドッグラン一覧を並列で取得する非同期関数
+  Future<MapDataResult> _loadInitialData() async {
+    // Future.waitで並列処理（JavaのCompletableFuture.allOfのようなもの）
+    final results = await Future.wait([
+      _locationService.getCurrentLocation(),
+      _apiService.fetchMapRuns(),
+    ]);
+
+    return MapDataResult(
+      currentPosition: results[0] as Position?,
+      dogRuns: results[1] as List<DogRunMapData>,
+    );
+  }
+
   Set<Marker> _convertToMarkers(List<DogRunMapData> dogRuns) {
     return dogRuns.map((run) {
       return Marker(
@@ -63,50 +78,47 @@ class _MapScreenState extends State<MapScreen> {
         title: const Text('dogRun 表示テスト'),
         backgroundColor: Colors.amber,
       ),
-      body: FutureBuilder<List<DogRunMapData>>(
-        future: _dogRunsFuture,
+      body: FutureBuilder<MapDataResult>(
+        future: _mapDataFuture,
         builder: (context, snapshot) {
-          // 1. 読み込み中（Spring Bootからのレスポンス待ち）の画面
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(
-              child: CircularProgressIndicator(),
-            );
-          }
-
-          // 2. エラー発生時の画面
-          else if (snapshot.hasError) {
+            return const Center(child: CircularProgressIndicator());
+          } else if (snapshot.hasError) {
             return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  'データ取得エラーが発生しました:\n${snapshot.error}',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.red),
-                ),
-              ),
+              child: Text('データ取得エラー: ${snapshot.error}', style: const TextStyle(color: Colors.red)),
             );
+          } else if (!snapshot.hasData) {
+            return const Center(child: Text('データを読み込めませんでした。'));
           }
 
-          // 3. データが空、またはうまく取得できなかった時の画面
-          else if (!snapshot.hasData || snapshot.data!.isEmpty) {
-            return const Center(
-              child: Text('表示できるドッグラン情報がありません。'),
-            );
-          }
+          final data = snapshot.data!;
+          final Set<Marker> mapMarkers = _convertToMarkers(data.dogRuns);
 
-          // 4. 【成功】データが正常に届いた場合の画面
-          final List<DogRunMapData> dogRuns = snapshot.data!;
-          final Set<Marker> mapMarkers = _convertToMarkers(dogRuns);
+          // 現在地が取得できていればそれをターゲットに、無ければデフォルト（東京）にする
+          final LatLng mapCenter = data.currentPosition != null
+              ? LatLng(data.currentPosition!.latitude, data.currentPosition!.longitude)
+              : _defaultCenter;
 
           return GoogleMap(
-            initialCameraPosition: _kInitialPosition,
+            initialCameraPosition: CameraPosition(
+              target: mapCenter,
+              zoom: 13.5,
+            ),
             mapType: MapType.normal,
             markers: mapMarkers,
-            myLocationEnabled: false,
-            myLocationButtonEnabled: false,
+            // 現在地が取得できている場合のみ、マップ上の青い丸と現在地ボタンを有効化
+            myLocationEnabled: data.currentPosition != null,
+            myLocationButtonEnabled: data.currentPosition != null,
           );
         },
       ),
     );
   }
+}
+
+// 複数の非同期結果を1つにまとめるコンテナクラス
+class MapDataResult {
+  final Position? currentPosition; // 取得失敗を許容するためNullableにする
+  final List<DogRunMapData> dogRuns;
+  MapDataResult({required this.currentPosition, required this.dogRuns});
 }
