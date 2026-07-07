@@ -15,7 +15,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const MaterialApp(
-      title: 'dogrun表示テスト',
+      title: 'ドッグランマップ',
       home: MapScreen(),
     );
   }
@@ -32,29 +32,99 @@ class _MapScreenState extends State<MapScreen> {
   final DogRunService _apiService = DogRunService();
   final LocationService _locationService = LocationService();
 
-  // 画面に必要な2つのデータをまとめたFuture
   late Future<MapDataResult> _mapDataFuture;
-
-  // 地図の初期表示位置（代々木公園付近）
   static const LatLng _defaultCenter = LatLng(35.6715, 139.6966);
+
+  // リアルタイムにピンの状態を更新するため、取得したドッグランデータをStateでも保持する
+  List<DogRunMapData> _dogRuns = [];
 
   @override
   void initState() {
     super.initState();
-    _mapDataFuture = _loadInitialData();
+    _refreshData();
   }
 
-  // 現在地とドッグラン一覧を並列で取得する非同期関数
+  void _refreshData() {
+    setState(() {
+      _mapDataFuture = _loadInitialData();
+    });
+  }
+
   Future<MapDataResult> _loadInitialData() async {
-    // Future.waitで並列処理（JavaのCompletableFuture.allOfのようなもの）
     final results = await Future.wait([
       _locationService.getCurrentLocation(),
       _apiService.fetchMapRuns(),
     ]);
 
+    _dogRuns = results[1] as List<DogRunMapData>;
+
     return MapDataResult(
       currentPosition: results[0] as Position?,
-      dogRuns: results[1] as List<DogRunMapData>,
+      dogRuns: _dogRuns,
+    );
+  }
+
+  Future<void> _handleCheckIn(int id) async {
+    try {
+      final updatedRun = await _apiService.checkIn(id);
+
+      setState(() {
+        final index = _dogRuns.indexWhere((run) => run.id == id);
+        if (index != -1) {
+          _dogRuns[index] = updatedRun;
+        }
+      });
+
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${updatedRun.name} にチェックインしました！')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('エラー: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  void _showDetailBottomSheet(DogRunMapData run) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min, // コンテンツの大きさに合わせる
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(run.name, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              Text('現在のワンちゃん: ${run.activeDogCount} 匹', style: const TextStyle(fontSize: 16)),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton.icon(
+                  onPressed: () => _handleCheckIn(run.id),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.amber,
+                    foregroundColor: Colors.white,
+                  ),
+                  icon: const Icon(Icons.directions_run),
+                  label: const Text('チェックイン', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                ),
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -63,10 +133,8 @@ class _MapScreenState extends State<MapScreen> {
       return Marker(
         markerId: MarkerId(run.id.toString()),
         position: LatLng(run.latitude, run.longitude),
-        infoWindow: InfoWindow(
-          title: run.name,
-          snippet: '現在の滞在数: ${run.activeDogCount}匹',
-        ),
+        // 💡 標準のInfoWindow（吹き出し）は無効化し、タップ時にボトムシートを開く
+        onTap: () => _showDetailBottomSheet(run),
       );
     }).toSet();
   }
@@ -75,8 +143,14 @@ class _MapScreenState extends State<MapScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('dogRun 表示テスト'),
+        title: const Text('チェックイン'),
         backgroundColor: Colors.amber,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _refreshData, // 手動リフレッシュボタン
+          )
+        ],
       ),
       body: FutureBuilder<MapDataResult>(
         future: _mapDataFuture,
@@ -84,29 +158,20 @@ class _MapScreenState extends State<MapScreen> {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           } else if (snapshot.hasError) {
-            return Center(
-              child: Text('データ取得エラー: ${snapshot.error}', style: const TextStyle(color: Colors.red)),
-            );
+            return Center(child: Text('エラー: ${snapshot.error}'));
           } else if (!snapshot.hasData) {
-            return const Center(child: Text('データを読み込めませんでした。'));
+            return const Center(child: Text('データなし'));
           }
 
           final data = snapshot.data!;
-          final Set<Marker> mapMarkers = _convertToMarkers(data.dogRuns);
-
-          // 現在地が取得できていればそれをターゲットに、無ければデフォルト（東京）にする
           final LatLng mapCenter = data.currentPosition != null
               ? LatLng(data.currentPosition!.latitude, data.currentPosition!.longitude)
               : _defaultCenter;
 
           return GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: mapCenter,
-              zoom: 13.5,
-            ),
+            initialCameraPosition: CameraPosition(target: mapCenter, zoom: 13.5),
             mapType: MapType.normal,
-            markers: mapMarkers,
-            // 現在地が取得できている場合のみ、マップ上の青い丸と現在地ボタンを有効化
+            markers: _convertToMarkers(_dogRuns), // Stateのリストからマーカーを生成
             myLocationEnabled: data.currentPosition != null,
             myLocationButtonEnabled: data.currentPosition != null,
           );
@@ -116,9 +181,8 @@ class _MapScreenState extends State<MapScreen> {
   }
 }
 
-// 複数の非同期結果を1つにまとめるコンテナクラス
 class MapDataResult {
-  final Position? currentPosition; // 取得失敗を許容するためNullableにする
+  final Position? currentPosition;
   final List<DogRunMapData> dogRuns;
   MapDataResult({required this.currentPosition, required this.dogRuns});
 }

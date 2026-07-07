@@ -15,4 +15,18 @@ class DogRunService {
     }
     throw Exception('Failed to load data');
   }
+
+  Future<DogRunMapData> checkIn(int id) async {
+    try {
+      print('/dogRuns/$id/checkIn');
+      final response = await _dio.post('/dogRuns/$id/checkIn');
+
+      if (response.statusCode == 200) {
+        return DogRunMapData.fromJson(response.data);
+      }
+      throw Exception('チェックインに失敗しました');
+    } catch (e) {
+      throw Exception('通信エラー: $e');
+    }
+  }
 }
